@@ -2,8 +2,8 @@
 
 A post is "new" when, at HEAD, it exists with draft=false AND at BASE it either
 did not exist or had draft=true. Edits to already-published posts are ignored.
-Renames show up as delete+add; that is safe because the crosspost ledger is the
-final idempotency guard.
+Renames show up as delete+add, so a renamed published post can be reported as new.
+The LinkedIn step skips posts whose draft file already exists.
 
 Usage: detect_new_posts.py --base <sha> --head <sha> [--github-output]
 """
