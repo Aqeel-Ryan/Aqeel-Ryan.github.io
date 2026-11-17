@@ -1,6 +1,6 @@
 """Generate three LinkedIn post drafts for each newly published blog post.
 
-For each post: call the Anthropic Messages API for 3 variants (lesson,
+For each post: call the DeepSeek chat API for 3 variants (lesson,
 contrarian, build-log), validate them, save linkedin/drafts/<slug>.md and open a
 GitHub Issue with the drafts for manual copy-paste. Nothing is ever posted to
 LinkedIn by this script.
@@ -9,7 +9,7 @@ Usage:
   linkedin_drafts.py --posts '<json from detect_new_posts>'
   linkedin_drafts.py --slug my-post            # regenerate (overwrites the drafts file)
   linkedin_drafts.py --slug my-post --dry-run  # no API call, no issue
-Environment: ANTHROPIC_API_KEY, ANTHROPIC_MODEL (default claude-sonnet-5-5), GH_TOKEN (for gh).
+Environment: DEEPSEEK_API_KEY, DEEPSEEK_MODEL (default deepseek-flash), GH_TOKEN (for gh).
 """
 from __future__ import annotations
 
@@ -25,12 +25,13 @@ from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-import anthropic
+from openai import OpenAI
 from pydantic import BaseModel, ValidationError, field_validator, model_validator
 
 from scripts.posts import POSTS_DIR, ROOT, Post, PostError, canonical_url, load_post, site_config, site_url
 
-DEFAULT_MODEL = "claude-sonnet-5-5"
+DEFAULT_MODEL = "deepseek-flash"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 STYLES = ("lesson", "contrarian", "buildlog")
 STYLE_BRIEFS = {
     "lesson": 'Lesson: "Here\'s what I learned building X". Open with the lesson or the surprise, then the evidence from the post.',
@@ -46,27 +47,6 @@ _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _EMOJI = re.compile(
     "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F2FF\U0001F900-\U0001F9FF\U00002B00-\U00002BFF\U0000FE0F]"
 )
-
-JSON_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "variants": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "style": {"type": "string", "enum": list(STYLES)},
-                    "text": {"type": "string"},
-                },
-                "required": ["style", "text"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["variants"],
-    "additionalProperties": False,
-}
-
 
 class DraftError(RuntimeError):
     """Generation failed after the allowed retry."""
@@ -200,7 +180,10 @@ def build_prompts(post: Post, url: str, voice: str, problems: str | None = None)
         f"{briefs}\n\n"
         f"Post URL (use exactly): {url}\n\n"
         f"<blog_post title={json.dumps(post.title)}>\n{post.body.strip()}\n</blog_post>\n\n"
-        'Return JSON: {"variants": [{"style": "lesson|contrarian|buildlog", "text": "..."}]} with exactly one entry per style.'
+        "Return only a JSON object, no prose and no code fences, in exactly this json format, "
+        "with exactly one entry per style:\n"
+        '{"variants": [{"style": "lesson", "text": "..."}, {"style": "contrarian", "text": "..."}, '
+        '{"style": "buildlog", "text": "..."}]}'
     )
     if problems:
         user += (
@@ -210,29 +193,28 @@ def build_prompts(post: Post, url: str, voice: str, problems: str | None = None)
     return system, user
 
 
-def call_model(client: anthropic.Anthropic, model: str, system: str, user: str) -> str:
-    """One API call. Returns the raw JSON text or raises DraftError on refusal/truncation."""
-    response = client.beta.messages.create(
+def call_model(client: OpenAI, model: str, system: str, user: str) -> str:
+    """One API call (DeepSeek, OpenAI-compatible). Returns raw JSON text or raises."""
+    response = client.chat.completions.create(
         model=model,
-        max_tokens=8000,
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        output_config={"format": {"type": "json_schema", "schema": JSON_SCHEMA}, "effort": "medium"},
+        max_tokens=16000,  # generous: JSON mode can be cut off, and thinking tokens count toward the budget
+        response_format={"type": "json_object"},
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
     )
-    if response.stop_reason == "refusal":
+    choice = response.choices[0]
+    if choice.finish_reason == "content_filter":
         raise DraftError("the model declined to write this post")
-    if response.stop_reason == "max_tokens":
+    if choice.finish_reason == "length":
         raise ValueError("response was cut off at max_tokens")
-    text = next((b.text for b in response.content if b.type == "text"), None)
-    if text is None:
-        raise ValueError("response contained no text block")
+    text = (choice.message.content or "").strip()
+    if not text:
+        # DeepSeek JSON mode replaces unparseable output with spaces, so blank means "retry".
+        raise ValueError("response was blank (the model did not return JSON)")
     return text
 
 
 def generate_drafts(
-    client: anthropic.Anthropic, model: str, post: Post, url: str, voice: str, *, attempts: int = 2
+    client: OpenAI, model: str, post: Post, url: str, voice: str, *, attempts: int = 2
 ) -> Drafts:
     """Generate and validate. One retry (attempts=2) on malformed or rule-breaking output."""
     problems: str | None = None
@@ -327,7 +309,7 @@ def find_post_by_slug(root: Path, slug: str) -> Post:
 def process_post(
     post: Post,
     root: Path,
-    client: anthropic.Anthropic | None,
+    client: OpenAI | None,
     model: str,
     *,
     force: bool,
@@ -384,13 +366,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         posts = [load_post(root / item["path"], root) for item in json.loads(args.posts)]
 
-    model = os.environ.get("ANTHROPIC_MODEL") or DEFAULT_MODEL
+    model = os.environ.get("DEEPSEEK_MODEL") or DEFAULT_MODEL
     client = None
     if not args.dry_run:
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            print("::error::ANTHROPIC_API_KEY is not set")
+        if not os.environ.get("DEEPSEEK_API_KEY"):
+            print("::error::DEEPSEEK_API_KEY is not set")
             return 1
-        client = anthropic.Anthropic()
+        client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url=DEEPSEEK_BASE_URL)
 
     ok = True
     for post in posts:

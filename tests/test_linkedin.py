@@ -34,24 +34,29 @@ def payload(**kw):
     return json.dumps({"variants": [{"style": s, "text": variant(**kw)} for s in ld.STYLES]})
 
 
-class Block:
-    type = "text"
+class Message:
+    def __init__(self, content):
+        self.content = content
 
-    def __init__(self, text):
-        self.text = text
+
+class Choice:
+    def __init__(self, content, finish_reason):
+        self.message = Message(content)
+        self.finish_reason = finish_reason
 
 
 class Response:
-    def __init__(self, text, stop_reason="end_turn"):
-        self.content = [Block(text)]
-        self.stop_reason = stop_reason
+    def __init__(self, text, finish_reason="stop"):
+        self.choices = [Choice(text, finish_reason)]
 
 
 class FakeClient:
+    """Mimics openai.OpenAI().chat.completions.create."""
+
     def __init__(self, outputs):
         self.outputs = list(outputs)
         self.calls = []
-        self.beta = self.messages = self
+        self.chat = self.completions = self
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
@@ -102,21 +107,34 @@ def test_malformed_payloads_are_rejected(raw, fragment):
         ld.parse_and_validate(raw, URL, POST.body)
 
 
-def test_generate_uses_configured_model_and_fallbacks():
+def test_generate_uses_configured_model_and_json_mode():
     client = FakeClient([payload()])
     ld.generate_drafts(client, "my-model", POST, URL, "voice text")
     call = client.calls[0]
+    system, user = call["messages"][0]["content"], call["messages"][1]["content"]
     assert call["model"] == "my-model"
-    assert call["fallbacks"] == "default" and call["betas"] == ["server-side-fallback-2026-07-01"]
-    assert call["output_config"]["format"]["type"] == "json_schema"
-    assert "voice text" in call["system"]
+    assert call["response_format"] == {"type": "json_object"}
+    assert "voice text" in system
+    assert "json" in user.lower() and '"variants"' in user  # DeepSeek JSON mode needs the word and an example
+    assert call["max_tokens"] >= 8000
+
+
+def test_default_model_is_deepseek_flash_and_overridable_by_env(monkeypatch):
+    assert ld.DEFAULT_MODEL == "deepseek-flash"
+    monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+    assert ld.main(["--slug", "sample-pipeline-dry-run", "--dry-run"]) == 0
+
+
+def test_missing_api_key_fails_cleanly(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    assert ld.main(["--slug", "sample-pipeline-dry-run"]) == 1
 
 
 def test_malformed_response_is_retried_once_with_feedback():
     client = FakeClient(["not json", payload()])
     ld.generate_drafts(client, "m", POST, URL, "v")
     assert len(client.calls) == 2
-    assert "rejected" in client.calls[1]["messages"][0]["content"]
+    assert "rejected" in client.calls[1]["messages"][1]["content"]
 
 
 def test_invalid_twice_raises_after_exactly_two_calls():
@@ -126,15 +144,22 @@ def test_invalid_twice_raises_after_exactly_two_calls():
     assert len(client.calls) == 2
 
 
-def test_refusal_fails_without_retry():
-    client = FakeClient([("{}", "refusal")])
+def test_content_filter_fails_without_retry():
+    client = FakeClient([("", "content_filter")])
     with pytest.raises(ld.DraftError, match="declined"):
         ld.generate_drafts(client, "m", POST, URL, "v")
     assert len(client.calls) == 1
 
 
 def test_truncated_response_is_retried():
-    client = FakeClient([('{"variants": [', "max_tokens"), payload()])
+    client = FakeClient([('{"variants": [', "length"), payload()])
+    ld.generate_drafts(client, "m", POST, URL, "v")
+    assert len(client.calls) == 2
+
+
+def test_blank_response_from_json_mode_is_retried():
+    """DeepSeek JSON mode can return only spaces when the output is not valid JSON."""
+    client = FakeClient(["      ", payload()])
     ld.generate_drafts(client, "m", POST, URL, "v")
     assert len(client.calls) == 2
 

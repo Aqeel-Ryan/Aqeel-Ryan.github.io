@@ -12,7 +12,7 @@ flowchart LR
   D --> E[detect<br/>git diff, parse frontmatter]
   E -->|new posts JSON| F[crosspost<br/>dev.to + Hashnode]
   F -->|ledger commit| G[(published.json)]
-  F --> H[linkedin<br/>Claude API, 3 variants]
+  F --> H[linkedin<br/>DeepSeek API, 3 variants]
   E -->|new posts JSON| H
   H --> I[GitHub Issue<br/>linkedin-draft]
   H --> J[(linkedin/drafts/slug.md)]
@@ -26,7 +26,7 @@ flowchart LR
 | New-post detection | `scripts/detect_new_posts.py` | A post is new if it was added with `draft: false`, or flipped from `draft: true` to `false`. Edits to published posts are ignored |
 | Cross-posting | `scripts/crosspost.py` | Direct dev.to and Hashnode API clients (crier was evaluated and rejected, see below) |
 | Ledger | `published.json` | `slug -> platform -> {id, url, published_at}`. Checked before every publish, so nothing posts twice |
-| LinkedIn drafts | `scripts/linkedin_drafts.py`, `linkedin/voice.md` | 3 validated variants per post, saved to `linkedin/drafts/` and opened as an Issue |
+| LinkedIn drafts | `scripts/linkedin_drafts.py`, `linkedin/voice.md` | 3 validated variants per post from the DeepSeek API (OpenAI-compatible client, JSON mode), saved to `linkedin/drafts/` and opened as an Issue |
 | Workflows | `.github/workflows/publish.yml`, `ci.yml` | Publish on push to `main`. Tests and build on PRs |
 
 The slug of `src/content/posts/2026-11-17-my-post.md` is `my-post`, and its URL is `<site>/posts/my-post/`. The same rule is implemented in `src/lib/urls.ts` and `scripts/posts.py`, and a test keeps them in step.
@@ -44,7 +44,7 @@ The slug of `src/content/posts/2026-11-17-my-post.md` is `my-post`, and its URL 
 
    | Secret | Where to get it |
    |---|---|
-   | `ANTHROPIC_API_KEY` | console.anthropic.com |
+   | `DEEPSEEK_API_KEY` | platform.deepseek.com, API keys |
    | `DEVTO_API_KEY` | dev.to, Settings, Extensions, Generate API key |
    | `HASHNODE_TOKEN` | hashnode.com/settings/developer |
    | `HASHNODE_PUBLICATION_ID` | your publication's ID (Hashnode dashboard, or the `me { publications }` GraphQL query) |
@@ -54,7 +54,7 @@ The slug of `src/content/posts/2026-11-17-my-post.md` is `my-post`, and its URL 
    | Variable | Value |
    |---|---|
    | `CROSSPOST_ENABLED` | `true` to cross-post, anything else (or unset) to turn it off |
-   | `ANTHROPIC_MODEL` | optional; defaults to `claude-sonnet-5-5` |
+   | `DEEPSEEK_MODEL` | optional; defaults to `deepseek-flash` (also valid: `deepseek-v4-pro`) |
 
 6. **Edit `linkedin/voice.md`** so the drafts sound like you, and fill in `src/pages/about.astro` (it is a stub).
 7. **Install the skill** if it is not already at `~/.claude/skills/blog-draft/` (copy `skills/blog-draft/` there). The first `/blog-draft` run asks for the path of this repo.
@@ -113,7 +113,7 @@ For an end-to-end rehearsal, copy the sample post, set `draft: false`, and push 
 - **Drafts never publish.** `getPublishedPosts()` filters `draft: true` for every page, tag, feed and sitemap entry. CI also fails if a draft slug appears in `dist/`.
 - **No duplicates.** Every (slug, platform) pair is looked up in `published.json` before posting and written immediately after success. Re-running the workflow, or editing a published post, posts nothing new. Concurrent runs are serialized.
 - **Ambiguous failures are never auto-retried.** Only HTTP 429 is retried. After a timeout or a 5xx the post may or may not exist on the platform, so the run fails loudly and says to check before re-running.
-- **LinkedIn drafts are checked in code,** not just requested: 120-220 words, short paragraphs, at most 3 hashtags (last line only), at most 1 emoji, the post URL exactly once near the end, and no number that is not in the post. One retry with the reasons, then the job fails.
+- **LinkedIn drafts are checked in code,** not just requested: 120-220 words, short paragraphs, at most 3 hashtags (last line only), at most 1 emoji, the post URL exactly once near the end, and no number that is not in the post. One retry with the reasons, then the job fails. The text of the post and `linkedin/voice.md` are sent to DeepSeek's API.
 - **Secrets** come only from Actions secrets, are passed to the one step that needs them, and are scrubbed from error text.
 - **Actions are pinned to full commit SHAs** (a CI job enforces it).
 
@@ -131,11 +131,13 @@ For an end-to-end rehearsal, copy the sample post, set `draft: false`, and push 
 | Hashnode error about publication or tags | Check `HASHNODE_PUBLICATION_ID`; tag slugs must exist or be creatable on your publication |
 | Ledger or drafts commit fails to push | `main` is protected, or runs raced. Allow the bot to push, or add the files by hand |
 | LinkedIn job: `drafts still invalid` | The model broke a rule twice (the log lists which). Re-run from the Actions tab, or tighten `linkedin/voice.md`. A draft that rounds or spells out a number from the post can trip the number check |
-| LinkedIn job: `declined to write this post` | A safety classifier declined. Re-run, or write the LinkedIn post by hand |
-| `ANTHROPIC_API_KEY is not set` | Add the secret (setup step 4) |
+| LinkedIn job: `declined to write this post` | The API's content filter declined. Re-run, or write the LinkedIn post by hand |
+| LinkedIn job: `response was blank` | DeepSeek's JSON mode returns only spaces when it cannot produce valid JSON. The script retries once; if it persists, re-run or simplify `linkedin/voice.md` |
+| LinkedIn job: `model not found` or 400 on the model | DeepSeek renames models. Set the `DEEPSEEK_MODEL` variable to a current name from platform.deepseek.com (the legacy names `deepseek-chat` and `deepseek-reasoner` are not listed in the current docs) |
+| `DEEPSEEK_API_KEY is not set` | Add the secret (setup step 4) |
 | `npm ci` fails on Node version | Astro 7 needs Node >= 22.23.4; use the version in `.nvmrc` |
 | `/blog-draft` writes to the wrong repo | Edit `blog_repo` in `~/.claude/skills/blog-draft/config.json` |
 
 ## Tests
 
-`poetry run pytest -q` covers new-post detection (added, draft to published, edits ignored, first commit, bad inputs), ledger idempotency and cross-post behavior with HTTP mocked, frontmatter validation, and LinkedIn JSON parsing and rule validation with the Anthropic client mocked. On pull requests, `ci.yml` runs the tests, `astro check`, a build with a draft-leak check, and the SHA-pinning check.
+`poetry run pytest -q` covers new-post detection (added, draft to published, edits ignored, first commit, bad inputs), ledger idempotency and cross-post behavior with HTTP mocked, frontmatter validation, and LinkedIn JSON parsing and rule validation with the DeepSeek (OpenAI-compatible) client mocked. On pull requests, `ci.yml` runs the tests, `astro check`, a build with a draft-leak check, and the SHA-pinning check.
