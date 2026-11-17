@@ -1,0 +1,8 @@
+---
+import Base from '../layouts/Base.astro';
+import { SITE_URL } from '../config';
+---
+<Base title="Not found" description="Page not found." canonical={`${SITE_URL}/404/`}>
+  <h1>Page not found</h1>
+  <p><a href="/">Back to the posts</a></p>
+</Base>

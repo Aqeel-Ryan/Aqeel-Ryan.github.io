@@ -1,0 +1,40 @@
+---
+import '../styles/global.css';
+import BaseHead from '../components/BaseHead.astro';
+import { SITE_TITLE, AUTHOR } from '../config';
+
+interface Props {
+  title: string;
+  description: string;
+  canonical: string;
+  image?: string;
+  type?: 'website' | 'article';
+  publishedTime?: Date;
+}
+const props = Astro.props;
+---
+<!doctype html>
+<html lang="en">
+  <head><BaseHead {...props} /></head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/">{SITE_TITLE}</a>
+      <nav>
+        <a href="/">Posts</a>
+        <a href="/tags/">Tags</a>
+        <a href="/about/">About</a>
+        <a href="/rss.xml">RSS</a>
+        <button id="theme-toggle" type="button" aria-label="Toggle dark mode">◐</button>
+      </nav>
+    </header>
+    <main><slot /></main>
+    <footer class="site-footer">© {new Date().getFullYear()} {AUTHOR}</footer>
+    <script is:inline>
+      document.getElementById('theme-toggle').addEventListener('click', function () {
+        var next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+        document.documentElement.dataset.theme = next;
+        try { localStorage.setItem('theme', next); } catch (e) {}
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,17 @@
+---
+import Base from '../../layouts/Base.astro';
+import PostList from '../../components/PostList.astro';
+import { getTags } from '../../lib/posts';
+import { tagPath } from '../../lib/urls';
+import { SITE_URL } from '../../config';
+
+export async function getStaticPaths() {
+  const tags = await getTags();
+  return [...tags.entries()].map(([tag, posts]) => ({ params: { tag }, props: { tag, posts } }));
+}
+const { tag, posts } = Astro.props;
+---
+<Base title={`#${tag}`} description={`Posts tagged ${tag}.`} canonical={`${SITE_URL}${tagPath(tag)}`}>
+  <h1>#{tag}</h1>
+  <PostList posts={posts} />
+</Base>

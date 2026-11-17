@@ -1,0 +1,182 @@
+name: Publish
+
+# Deploys the site on every push that changes site content or code, then
+# cross-posts any newly published posts. Ledger/draft commits made by the bot
+# live outside these paths and carry [skip ci], so they never retrigger this.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "public/**"
+      - "site.config.json"
+      - "astro.config.mjs"
+      - "package.json"
+      - "package-lock.json"
+      - ".nvmrc"
+      - ".github/workflows/publish.yml"
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: "Regenerate LinkedIn drafts for this post slug (skips deploy and cross-post)"
+        required: false
+        default: ""
+        type: string
+
+permissions: {}
+
+# One run at a time so ledger commits can never race each other.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name == 'push' || inputs.slug == ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: dist
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  detect:
+    needs: deploy
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      posts: ${{ steps.detect.outputs.posts }}
+      has_posts: ${{ steps.detect.outputs.has_posts }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: Install Python dependencies
+        env:
+          POETRY_VIRTUALENVS_CREATE: "false"
+        run: |
+          pip install poetry==2.1.4
+          poetry install --only main --no-root
+      - id: detect
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: python -m scripts.detect_new_posts --base "$BEFORE_SHA" --head "$HEAD_SHA" --github-output
+
+  crosspost:
+    needs: detect
+    if: needs.detect.outputs.has_posts == 'true' && vars.CROSSPOST_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # only to commit published.json back
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: Install Python dependencies
+        env:
+          POETRY_VIRTUALENVS_CREATE: "false"
+        run: |
+          pip install poetry==2.1.4
+          poetry install --only main --no-root
+      - name: Cross-post new posts
+        env:
+          POSTS: ${{ needs.detect.outputs.posts }}
+          DEVTO_API_KEY: ${{ secrets.DEVTO_API_KEY }}
+          HASHNODE_TOKEN: ${{ secrets.HASHNODE_TOKEN }}
+          HASHNODE_PUBLICATION_ID: ${{ secrets.HASHNODE_PUBLICATION_ID }}
+        run: python -m scripts.crosspost --posts "$POSTS" --ledger published.json
+      - name: Commit ledger
+        if: always()
+        run: |
+          if [ -n "$(git status --porcelain published.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add published.json
+            git commit -m "chore: update crosspost ledger [skip ci]"
+            for attempt in 1 2 3; do
+              git pull --rebase origin main && git push origin HEAD:main && exit 0
+              sleep $((attempt * 3))
+            done
+            echo "::error::could not push the ledger commit"
+            exit 1
+          fi
+
+  linkedin:
+    # Runs after crosspost (success, failure or skip) so the two never push at once.
+    needs: [detect, crosspost]
+    if: >-
+      ${{ !cancelled() && (
+        needs.detect.outputs.has_posts == 'true' ||
+        (github.event_name == 'workflow_dispatch' && inputs.slug != '')) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # commit linkedin/drafts/*.md
+      issues: write # open the draft issue
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: Install Python dependencies
+        env:
+          POETRY_VIRTUALENVS_CREATE: "false"
+        run: |
+          pip install poetry==2.1.4
+          poetry install --only main --no-root
+      - name: Generate LinkedIn drafts and open the issue
+        env:
+          POSTS: ${{ needs.detect.outputs.posts }}
+          SLUG: ${{ inputs.slug }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "$SLUG" ]; then
+            python -m scripts.linkedin_drafts --slug "$SLUG"
+          else
+            python -m scripts.linkedin_drafts --posts "$POSTS"
+          fi
+      - name: Commit drafts
+        if: always()
+        run: |
+          if [ -n "$(git status --porcelain linkedin/drafts)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add linkedin/drafts
+            git commit -m "chore: add LinkedIn drafts [skip ci]"
+            for attempt in 1 2 3; do
+              git pull --rebase origin main && git push origin HEAD:main && exit 0
+              sleep $((attempt * 3))
+            done
+            echo "::error::could not push the drafts commit"
+            exit 1
+          fi

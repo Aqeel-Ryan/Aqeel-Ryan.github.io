@@ -1,0 +1,11 @@
+---
+import Base from '../layouts/Base.astro';
+import PostList from '../components/PostList.astro';
+import { getPublishedPosts } from '../lib/posts';
+import { SITE_TITLE, SITE_DESCRIPTION, SITE_URL } from '../config';
+const posts = (await getPublishedPosts()).slice(0, 10);
+---
+<Base title={SITE_TITLE} description={SITE_DESCRIPTION} canonical={`${SITE_URL}/`}>
+  <h1>Latest posts</h1>
+  <PostList posts={posts} />
+</Base>

@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "aqeel-ryan-blog-tools"
+version = "0.1.0"
+description = "Publishing pipeline scripts for the blog (new-post detection, cross-posting, LinkedIn drafts)."
+authors = ["Aqeel Ryan"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.13"
+requests = "2.34.2"
+pyyaml = "6.0.3"
+anthropic = "2.9.0"
+pydantic = "2.14.3"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "9.2.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"

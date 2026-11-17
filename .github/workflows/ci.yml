@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        env:
+          POETRY_VIRTUALENVS_CREATE: "false"
+        run: |
+          pip install poetry==2.1.4
+          poetry install --no-root
+      - name: Run tests
+        run: python -m pytest -q
+
+  site:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - name: Drafts must not reach the build output
+        run: |
+          # Every draft post slug must be absent from dist/.
+          for f in src/content/posts/*.md; do
+            if grep -qE '^draft:[[:space:]]*true[[:space:]]*$' "$f"; then
+              slug=$(basename "$f" .md | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-//')
+              if grep -rqF "/posts/$slug/" dist; then
+                echo "::error::draft '$slug' leaked into dist/"
+                exit 1
+              fi
+            fi
+          done
+
+  workflows:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require every action to be pinned to a full commit SHA
+        run: |
+          bad=$(grep -hE '^\s*-?\s*uses:' .github/workflows/*.yml | grep -vE 'uses: [^@ ]+@[0-9a-f]{40}( |$)' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::unpinned actions:"; echo "$bad"; exit 1
+          fi

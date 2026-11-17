@@ -1,0 +1,13 @@
+---
+import Base from '../../layouts/Base.astro';
+import { getTags } from '../../lib/posts';
+import { tagPath } from '../../lib/urls';
+import { SITE_URL } from '../../config';
+const tags = [...(await getTags()).entries()].sort((a, b) => b[1].length - a[1].length);
+---
+<Base title="Tags" description="All topics on this blog." canonical={`${SITE_URL}/tags/`}>
+  <h1>Tags</h1>
+  <ul class="tag-list">
+    {tags.map(([tag, posts]) => <li><a href={tagPath(tag)}>#{tag}</a> <span class="muted">({posts.length})</span></li>)}
+  </ul>
+</Base>

@@ -1,0 +1,26 @@
+---
+import { render } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+import { getPublishedPosts, formatDate } from '../../lib/posts';
+import { canonicalUrl, tagPath } from '../../lib/urls';
+
+export async function getStaticPaths() {
+  const posts = await getPublishedPosts();
+  return posts.map((post) => ({ params: { slug: post.slug }, props: { post } }));
+}
+const { post } = Astro.props;
+const { Content } = await render(post);
+const { title, description, date, tags, cover, project_repo } = post.data;
+const image = cover ?? `/og/${post.slug}.png`;
+---
+<Base title={title} description={description} canonical={canonicalUrl(post.slug)} image={image} type="article" publishedTime={date}>
+  <article>
+    <h1>{title}</h1>
+    <p class="muted">
+      <time datetime={date.toISOString()}>{formatDate(date)}</time>
+      {tags.map((t) => <> · <a href={tagPath(t)}>#{t}</a></>)}
+      {project_repo && <> · <a href={project_repo} rel="noopener">Source</a></>}
+    </p>
+    <div class="prose"><Content /></div>
+  </article>
+</Base>
